@@ -1,0 +1,309 @@
+---
+title: "Tree-based Regression Analysis"
+author: "Darren Tanner"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+<style type="text/css"> 
+body{ /* Normal  */ 
+      font-size: 15px; 
+  } 
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+library(reticulate)
+use_python("/Users/Darren/anaconda3/bin:/Users/Darren/anaconda3/bin:/anaconda3/bin:/anaconda3/bin:/Library/Frameworks/Python.framework/Versions/3.6/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/TeX/texbin")
+```
+
+## Conditional Inference Trees
+
+Conditional inference trees (CTrees) are one implementation of a broader class of decision tree learning algorithms. These algorithms can be used for both classification, and relevant to the present study, also regression. A full discussion of how decision trees work is beyond the scope of this analysis (see [An Introduction to Statistical Learning](http://www-bcf.usc.edu/~gareth/ISL/) for a thorough overview); however, very briefly, decision trees try to partition observations into meaningful subgroups in a bottom-up, data-driven fashion. Often they are combined into decision tree ensembles using a series of permutations over both observations and predictor variables in a method known as random forests (RF) or via tree-boosting algorithms; RFs and boosting algorithms are powerful machine learning algorithms for predictive modeling.
+
+However, for our puroses, decision trees can be useful in a non-ensemble context for identifying meaningful predictors of a dependent measure in a multi-dimensional dataset. As a regression and classification tool, decision trees can model complex interactions between predictors and non-linear relationships between predictors and outcomes. Here they provide a non-parametric, bottom-up way of understanding the data, and in single-tree (non-ensemble) contexts can provide fairly interpretable models of data. Note, however, that prediction accuracy of single-trees will not be as strong as random forests or other ensemble methods, but they have interpretability to their advantage. 
+
+The method we will be using here conditional inference to partition the data into trees using the [ctree function from the party package for R](https://cran.r-project.org/web/packages/party/vignettes/party.pdf).[^1] CTrees differ from traditional implementations of decision trees ([such as CART](https://content.taylorfrancis.com/books/download?dac=C2009-0-07054-X&isbn=9781315139470&format=googlePreviewPdf)) build each tree node in two separate steps. First, a predictor is selected from the set of X features in the model over which to split, and then the best split point for that feature is chosen. A choice to split a node or not is based on a test of the global null hypothesis (i.e., that none of the predictor features is related to the outcome variable) using *p*-values from the set of all conditional distribution tests, corrected for multiple comparisons. If the null hypothesis is rejected, the variable with the strongest association with the outcome is chosen, and the split point is chosen such that it maximizes the test statistic over all possible split points. The algorithm stops either when no further splits would result in the rejection of the global null hypothesis, or where some arbitrary stopping criterion is met (e.g., a pre-set minimum number of observations in any terminal node of the tree). In this way CTrees do not require pruning in the way that CART trees do, and [CTrees maintain the nominal alpha level, even when the number of observations (and therefore number of possible interactions and non-linear relationships is very high)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5607590/).
+
+The following will use CTrees in an exploratory fashion as a non-parameteric, non-linear adjunct to the mixed effects models presented in the main text of the paper. The data will be the trial-level observations aggregated over the eight centro-parietal ROI-electrodes for each the 300-500 and 500-800 ms time windows. These are the same data used in the linear mixed effects models in the main text. This is similar in spirit to [a recent implementation of CTree random forests for modling eye movement data and individual differences during reading](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4710485/). 
+
+Following the initial data exploration using single trees, we will look at ensemble methods (random forests of CTrees, as well as mixed effects random forests). These models do not provide direct measures of stastical significance like single trees, but across an ensemble of bootstrapped trees they can give relative measures of variable importance. A high relative importance of the individual difference variables across bootstrapped trees would be informative.
+
+## Validating CTree models for regression
+
+First we will begin exploring the data, testing for the main effects of the experimental variables, and then check for interactions between these variables and individual items. This will help establish whether CTrees show the same sensitivities to the manipulations as seen in the parametric analyses.
+
+The predictors RC1 and RC2 refer to the rotated component scores from the PCA analysis reported in the text.  RC1 corresponds to the language experience component and RC2 corresponds to the working memory component.
+
+The data will be loaded and prepped via the accompanying R script, called below, which you can access for inspection.
+
+```{r}
+library(party) 
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+
+# Load and prep the data. 
+source("./Conditional Inference Tree Data Prep.R")
+
+# What do our dataframes look like?
+head(RC_N4_data)
+head(RC_P6_data)
+
+# Reproducibility
+set.seed(101)
+
+# Fit tree for fixed effects only for the N400 and P600 time windows
+N4_fixed_effects <- ctree(Amplitude ~ Grammaticality + VerbType, RC_N4_data)
+P6_fixed_effects <- ctree(Amplitude ~ Grammaticality + VerbType, RC_P6_data)
+
+# Plot the models
+plot(N4_fixed_effects, type = "simple")
+plot(P6_fixed_effects, type = "simple")
+````
+
+Here the model has partitioned the data in a manner very similar to the fixed effects estimates in the main text. In the N400 time window only one split was made, and this was based on VerbType; in the P600 time window one split was made based on grammaticality. The predicted mean amplitudes in each tree node indicated by the *y* variable in the tree nodes, and *n* referring to the number of observations in that node (the node weight in terms of the ctree function). In the N400 time window lexical verbs had less-positive (more negative) mean amplitudes than auxiliary verbs (an N400 effect); in the P600 time window, ungrammatical verbs had more positive mean amplitudes than grammatical verbs (a P600 effect). The fact that only one split was performed in each time window (i.e., only two terminal nodes per tree) means that there wasn't sufficient evidence supporting any further splits beyond the first partitioning. I.e., the second variable (grammaticality in the N400 time window and verb type in the P600 time window) did not show a strong enough influence on the data to reject the global null hypothesis (after multiple comparisons correction), indicating a non-significant effect of that variable in the time window. 
+
+Now we check whether these effects show any interaction with item. This is somewhat analagous to checking for varying slopes by items in a (generalized) linear model where fixed coefficients for items (and their interaction with condition) are estimated with no pooling; and it is similar in spirit to the partial pooling method used for estimating random coefficients for items in a mixed model approach as implemented in *lmer*.
+
+```{r}
+# Check for item effects
+N4_items <- ctree(Amplitude ~ Grammaticality + VerbType + Item, RC_N4_data)
+P6_items <- ctree(Amplitude ~ Grammaticality + VerbType + Item, RC_P6_data)
+
+# Plot the models
+plot(N4_items, type = "simple")
+plot(P6_items, type = "simple")
+```
+
+In the N400 time window we see that there are additional splits for items for each the auxiliary verb and lexical verb nodes. Thus, there appear to be item differences within each verb-type. However, these differences are hard to interpret on their face because the items are not paired into corresponding terminal nodes, since splitting was performed separately within each verb type (i.e., conditional on verb type; e.g., the items nodes 3 and 4 do not correspond to nodes 6 and 7, respectively).
+
+The items associated with each daughter node after a split are in actuality indicated in the plot; these are the rows of horizontal integers separated by commas between node levels in the trees. However, because of the large number of levels for the item factor (120), the default plotting method for CTree objects in R cannot fit them all in the scree.  The item identities in each node can be recovered by inspecting the model object, if one so wishes. 
+
+In the P600 time window we see that after splitting by grammaticality, there was evidence to do binary splitting of items into two groups, each within the grammatical and ungrammatical observation sets. Further that there was evidence for verbtype differences within some of the items (the right-hand daughter of node 2 (node 4) contains a subsets of items, with the complement set being in node 3).[^2] Nodes 5 and 6 show that, for some items, auxiliary verbs show more positive-going ERPs to ungrammatical verbs than their lexical verb counterparts. Again, the exact interpretation of the terminal nodes is now complicated, as it was in the N400 window, because items are not paired in any meaningful way across different splits. Rather, the items are split into the best groups that maximize the test statistic computed over the data (i.e., these are data-driven, bottom-up splits). However, note that these splits over subjects, like the item splits above, will lead to better model fit statistics (like SSE, MSE, RMSE, or MAE), since they account for more variation in the dataset.
+
+Now we check whether there are reliable differences between subjects by checking for interactions between the fixed factors and the subject factor.
+
+```{r}
+# Check for subject effects
+N4_Subs <- ctree(Amplitude ~ Grammaticality  + VerbType + Subject, RC_N4_data)
+P6_Subs <- ctree(Amplitude ~ Grammaticality  + VerbType + Subject, RC_P6_data)
+
+# Plot the models
+plot(N4_Subs, type = "simple")
+plot(P6_Subs, type = "simple")
+```
+
+Here we see strong interactions between the fixed factors and subjects. Indeed, in both time windows subject was the splitting variable in the root node of each tree, with further splits based on subject, both before and after the fixed factors. This signals that subjects showed notable variation in ERP amplitudes that were of sufficient magnitude and of sufficient systematicity to justify tree splits, over and above the experimentally-manipulated variables. Interesting to note is that in the N400 time window, only the verb type variable (among the two fixed factors) was selected as a splitting variable, and in the P600 time window, only grammaticality was selected as a splitting variable.  This further corroborates the conclusion that the two variables each exerted their strongest effects in the two respective time windows. However, as seen in the analysis incorporating items, above, verb type did show some interaction with grammaticality for some items in the P600 time window (though the interction was seemingly not strong enough in any sub-groups of participants to justify re-branching a node). If we were interested in which items these were, we could recover them from the model object. 
+
+Again, the "effects" of the experimental variables within subjects aren't easily interpreted in the same way that effects within items were not easily interpreted, above. However, the effects of the experimental variables (the fixed effects) are clear in both time windows, in a way that is similar to what was seen in the parametric analyses in the main paper.
+
+One important question is whether these CTree regression models are fitting the data any better or worse than a standard mixed effects regression model with fixed effects for the experimental variables, and random effects for both subjects and items (including intercepts and slopes). One way to investigate that is by comparing both the fitted values of the two models, as well as the residuals.
+
+We'll do that over trial-level observations in the P600 time window.
+
+```{r}
+# First, fit a CTree with terms for all of the potentially relevant factors
+P6_rand_effects <- ctree(Amplitude ~ Grammaticality + VerbType + Subject + Item, RC_P6_data)
+
+# A really complex tree
+plot(P6_rand_effects, type = "simple")
+
+# Now get predcitions
+predictions <- data.frame(treeFitted= as.vector(predict(P6_rand_effects)),
+                          P6_Observed = RC_P6_data$Amplitude,
+                          Subject = RC_P6_data$Subject,
+                          Grammaticality = RC_P6_data$Grammaticality) # VerbType not included because not significant
+predictions$treeResid <- with(predictions, treeFitted - P6_Observed)
+
+# Now get predictions from an analagous mixed model.
+# Mixed model code is commented so that it does not try to fit during document rendering (it 
+# takes about 8-10 min on my MacBook Pro). Re-load the saved model object during document rendering
+# 
+# mod <- lmer(Amplitude ~ Grammaticality*VerbType + (Grammaticality*VerbType|Subject) + (Grammaticality*VerbType|Item), 
+#             RC_P6_data)
+#saveRDS(mod, "mod.rds") # Save model object to re-load during document rendering to save time
+mod <- readRDS("mod.rds")
+
+# Add fitted values and residuals to the predictions dataframe
+predictions$lmerFitted <- predict(mod)
+predictions$lmerResid <- predict(mod) - RC_P6_data$Amplitude
+
+# Calculate RMSE
+treeRMSE <- sqrt(sum(predictions$treeResid^2)/nrow(predictions))
+lmerRMSE <- sqrt(sum(predictions$lmerResid^2)/nrow(predictions))
+
+# Plot correlation of residuals from the two methods
+cols <- viridis(4, option = "D")
+ggplot(predictions, aes(lmerResid, treeResid, col = Grammaticality)) + geom_point(size = 2, alpha = .3) + 
+  theme_minimal() + xlab("Residuals from lmer") + ylab("Residuals from tree model with subjects and items") +
+  annotate("text", x = -30, y = 25, label = paste0("lmer RMSE = ", round(lmerRMSE, 3))) +
+  annotate("text", x = -30, y =20, label = paste0("CTree RMSE = ", round(treeRMSE, 3))) +
+  scale_color_manual(name = "Grammatical", values = cols[c(1,3)], labels = c("Grammatical", "Ungrammatical")) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+The correlation of the two sets of residuals is nearly perfect, and the RMSE values are also near-identical. The correlation coefficient between the two variables is *r* = 0.973. This shows that -- *at least for this dataset* -- *lmer* models with random intercepts and slopes for subjects provide a very similar model fit to the tree-based regression model allowing effects to differ by subjects and items. 
+
+We can also see that the distributions of the residuals are nearly identical, and both very near-normal.
+
+```{r}
+ggplot(predictions) + theme_minimal() + geom_histogram(aes(lmerResid, fill = cols[1]), 
+                                                       alpha = .4, position = "identity", bins = 60) +
+  geom_histogram(aes(treeResid, fill = cols[2]), alpha = .4,
+                 position = "identity", bins = 60) + 
+    scale_fill_manual(name = "Model", values = cols[c(1,3)], labels = c("lmer", "CTree")) + xlab("Model Residual (µV)") +
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+One important way CTree regression differs from linear or additive models is that fitted values do not form continuous distributions. Rather, they fall into bins, where all observations within a particular bin will have the same predicted value. This can be seen when comparing the fitted (predicted) values from the CTree model and those from the *lmer* model. Here we add horizontal jitter to the fitted values from the CTree to reduce over-plotting.
+
+```{r}
+ggplot(predictions, aes(treeFitted, lmerFitted, col = Grammaticality)) + 
+  theme_minimal() + geom_jitter(alpha = .2, width = .15, alpha = .4) + 
+  scale_color_manual(name = "Grammaticality", values = cols[c(1, 3)], labels = c("Grammatical", "Ungrammatical")) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+  
+```
+
+We see that the fitted values between the two models are correlated, but not exceptionally strongly; the correlation coefficient is *r* = 0.755. However, despite this only moderately strong correlation, the similar RMSE values, above, indicate that both models achieve similar efficacy in modeling the underlying data. 
+
+**Overall, these findings suggest that the CTree approach to modeling effects of categorical variables, as well as subject and item effects, is similar in efficacy to that given by a linear mixed effects regression with random intercepts and slopes for subjects and items. However, rather than imposing a specific structure on the model, the CTree approach is a bottom-up, self-organizing tool that allows the data to 'find' its best model -- that is, the model that is justified by the data -- in a one-step process. The CTree aproach also does not make any direct assumptions about linearity in the relationships between predictors and outcomes (it can model both linear and non-linear reltionships), without the researcher having to specify polynomial or other transformed predictors in the model. This is a property that regression trees share with non-linear semi-parametric approaches to data modeling such as generalized additive (mixed) models. However, the tree-based approach can additionally model interactions of any degree, when justified by the data, without the researcher specifying them in the model design. In this way, regression trees are highly flexible.**
+
+Having seen that CTrees are generally valid, let us investigate whether the individual difference measures provide significant improvements to the model, over and above the fixed effects.
+
+## Modeling Individual Differences in CTrees
+
+Here we will refit the CTree models without a term for Subject, but instead with the rotated component (RC) scores derived from the PCA analysis.  Recall that RC1 corresponds to variation in language experience, and RC2 corresponds to differences in working memory. We remove the term for Subject, because each subject has a unique value for each of the RC scores, so that RC scores and subject indicators would be redundant.  However, rather than modeling Subject as a categorical effect with no particular order, as we did above, the RC scores will be modeled as continuous predictors to look for covaration between language experience and ERP amplitudes and between working memory and ERP amplitudes.
+
+```{r}
+N4_ID_tree <- ctree(Amplitude ~ Grammaticality + VerbType + RC1 + RC2, RC_N4_data)
+P6_ID_tree <- ctree(Amplitude ~ Grammaticality + VerbType + RC1 + RC2, RC_P6_data)
+
+# Plot the trees
+plot(N4_ID_tree, type = "simple")
+plot(P6_ID_tree, type = "simple")
+```
+
+These models show are identical to the first models fit, where only the fixed effects were modeled. The N4 model shows only a main effect of verb type. Similarly the P6 model shows only a main effect of grammaticality. Importantly, even though the model was allowed to split over the individual difference measures (which are also unique subject-level indicators), there was not enough evidence from the data to justify doing so.
+
+That is, although there was significant variation found in participants' brain responses across conditions in the models with terms for Subject, above, those differences did not map onto continuous measures of participants' language experience or working memory. Note also that the CTree approach does not improse the assumption of linearity on the relationship between the ID measures and the outcome; functions of nearly any shape could have been approximated, were there sufficient data in the model to justify the effect.
+
+**This result is in-line with the findings from the mixed model analysis in the main text of the paper. Importantly, they also show that the null result for an interaction between the ID measures and experimental variables does not rest on the assumption of a linear relationship.**
+
+As a further exploratory analysis, let us attempt to model the 5 manifest individual difference measures separately, rather than via their construct scores.
+
+```{r}
+N4_ID_tree2 <- ctree(Amplitude ~ Grammaticality + VerbType + 
+                       AuthorRecognition + PPVT + NAART + 
+                       OSpanPartial + LetterNumberSequencing, collapsed_N4_data)
+
+P6_ID_tree2 <- ctree(Amplitude ~ Grammaticality + VerbType + 
+                       AuthorRecognition + PPVT + NAART + 
+                       OSpanPartial + LetterNumberSequencing, collapsed_P6_data)
+
+# Plot them
+plot(N4_ID_tree2, type = "simple")
+plot(P6_ID_tree2, type = "simple")
+```
+
+The P600 data here are quite straight-forward. There was not sufficient evidence that the effect grammaticality was modulated by any of the individual difference variables.
+
+The findings for the N400 data do suggest evidence that some of the ID measures, though the complex nature of the interactions and involvement of different measures at different points in the tree makes the interpretation somewhat difficult.  When interpreting the split-points for any ID measure, remember that the variables were transformed to the *z*-scale, so they have a mean of 0 and standard deviation of 1. And recall that the PPVT is a measure of receptive vocabulary, Author Recognition is a measure of text exposure, and OSpanPartial and LetterNumberSequencing and different measures of verbal working memory.
+
+For auxiliary verbs, it seems that receptive vocabulary has an impact on mean ERP amplitudes, with those approximately below the mean PPVT score having more positive-going ERPs than those with above-average PPVT scores (since the split point, -0.063, was near the mean value of 0). The picture for lexical verbs are much more complex. For those with below-average PPVT scores, it appears that working memory (as measured by the OSpan task) has an effect, but only at the very lowest end of the working memory spectrum: the split point was near the *z*-value of -4, and only a few observations went into the low WM bin. For these people, having both very low WM (as measured by OSpan) and a lower than average receptive vocabulary resulted in more positive-going ERPs than being in the broad range of WM scores (node 8). But note that positive-going ERPs were not stricly a function of low vocabulary and poor WM: take node 15, which also shows very positive-going ERPs (but note also very few observations) in participants who had both high PPVT and ART scores, as well high WM scores (measured by the LNS). This indicates that the relationship between the ID variables and ERP measures is highly non-linear, such that a linear model would not be able to account for such effects.
+
+The most negative-going group is seen in node 12, for observations in participants who paradoxically had high PPVT scores (the right-hand split of nodes 5 and 10), but low ART scores (left-hand split of node 9). Although the PPVT and ART tasks are moderately correlated (see the main text) and measure a similar construct (language experience), they are obviously non-identical, such that a participant can have a high score on one and low score on the other. The fact that the measures are not perfectly correlated means that each can in principle account for separable variance in ERP amplitudes that a construct measure like a latent factor score, which takes their covariance into account, cannot. 
+
+However, unlike models using component scores as predictors, the N400 model is somewhat difficult to interpret due to the large number of interactions and has some paradoxical results.
+
+**Also important to notice is that the most extreme prediced ERP amplitudes (*y*-values in the terminal nodes 7, 12, and 15) have relatively few observations. The number of observations is consistent with the observations in these nodes being populated by only a single or possibly two participants (recall there were 60 trials per VerbType condition per participant in the design). This means that these nodes with extreme values (and with somewhat paradoxical, non-intuitive patterns of interactions leading up to the terminal node) *likely reflect outliers.* **
+
+Although the CTree algorithm only splits data when there is sufficient evidence to justify rejecting the global null (even after multiplicity corrections), it seems that the structure of this data indicate that -- when fitting the model on the full training set -- there may be influence from outliers, when the outliers are distant enough from the mean.
+
+## Random Forest Models for Individual Differences
+
+The most common approach to reduce the influence of outliers (and [thus reduce the possibility of overfitting the model and reducing the ability to generalize](http://journals.sagepub.com/doi/abs/10.1177/1745691617693393?url_ver=Z39.88-2003&rfr_id=ori:rid:crossref.org&rfr_dat=cr_pub%3dpubmed), where generalization is an obvious goal of model creation) when using tree-based methods is to fit ensembles of trees and generate a random forest. Random forest models fit a series of tree-based regression models on random bootstrap samples of the data, and are generally fit with only a subset of predictor variables. The subset of predictor variables is randomly chosen at each tree node to evaluate whether further splitting is necessary. The final "model" then is not a single tree, but the average of predictions over the entire tree ensemble. This random sampling method thus allows a better estimation of the nature of the data (without imposing *a priori* assumptions about its shape, as parametric models do), reduces influences the influence of outliers, and reduces the overfitting problem in general.  
+
+The *cforest* function in the *party* package uses the CTree method to generate individual trees in the forest, and recall that each tree is grown only to the point where the significance test indicates that no further splitting should take place. Thus the conditional inference tree implementation of random forests prevents overfitting via this stopping criterion.
+
+Final models are less interpretable than individual trees, since the model does not have its own node/branching structure. But models do provide metrics of varible importance, based on some information criterion. Absolute values of variable importance are not directly interpretable; only relative values are. But through this method we can see if any individual difference measures are important in determining final fitted model predictions.
+
+```{r}
+# Set random forest generation parameters
+# Generate 1000 trees per forest (more is beter; 500 is default),
+# and sample three predictors per node.
+cont <- cforest_control(ntree = 1000, mtry = 3)
+
+# Generate forests
+N4_ID_forest1 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Subject + Item, RC_N4_data,
+                         controls = cont)
+P6_ID_forest1 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Subject + Item, RC_P6_data,
+                         controls = cont)
+
+# Save data for document rendering, because these take a long time to fit
+saveRDS(N4_ID_forest1, "N4_ID_forest1.rds")
+saveRDS(P6_ID_forest1, "P6_ID_forest1.rds")
+
+# Reload for document rendering
+N4_ID_forest1 <- readRDS("N4_ID_forest1.rds")
+P6_ID_forest1 <- readRDS("P6_ID_forest1.rds")
+
+# Get variable importance and put them into a usable data frame
+varimps <- rbind(varimp(N4_ID_forest1), varimp(P6_ID_forest1))
+row.names(varimps) <- c("N4_model", "P6_model")
+varimps
+```
+
+These variable importance measures show that, for both time windows, Subject is the overwhelmingly most important variable in terms of accounting for variance in the data, with Item also showing notable effects, relative to the importance of the respective fixed effect predictor most relevant to the two time windows (verb type and grammaticality, respectively). The individual difference measures had relatively low importance, relative to the fixed effects and subject/item terms (remember that only relative terms within a model can be compared). They are 1-2 orders of magnitude less important than the fixed effect predictors of interest, and .8-2 orders of magnidude less important than the subject and item variables themselves.
+
+However, these models contained terms for both Subject, and the individual difference metrics. As dicussed above, the ID variables are in some ways subject-level indicators, since they are unique to each subject. Therefore we'll fit models that exclude the Subject term, and include only the ID variables
+
+```{r}
+N4_ID_forest2 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Item, RC_N4_data,
+                         controls = cont)
+P6_ID_forest2 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Item, RC_P6_data,
+                         controls = cont)
+
+saveRDS(N4_ID_forest2, "N4_ID_forest2.rds")
+saveRDS(P6_ID_forest2, "P6_ID_forest2.rds")
+
+# Reload for document rendering
+N4_ID_forest2 <- readRDS("N4_ID_forest2.rds")
+P6_ID_forest2 <- readRDS("P6_ID_forest2.rds")
+
+varimps2 <- rbind(varimp(N4_ID_forest2), varimp(P6_ID_forest2))
+row.names(varimps2) <- c("N4_model", "P6_model")
+varimps2
+```
+
+These models show that the RC predictors have noticably higher relative importances than the models including Subject as an additional categorical predictor. However, their relatively importance is nowhere near as great as the Subject varible was, and they still have lower importance than Item variance, and lower importance than the respective fixed effects relevant to each time window.
+
+Note, however, that each variable is nearly guaranteed to show a non-zero level of importance. This is because of the random sampling procedure for variable selection made when each node is assessed as a candidate for splitting. In these trees, each node was assessed with a random sample of 3 predictor variables out of the 5 total predictor variables. On some nodes in some trees, both RC variables will be selected, possibly in combination with a variable of low importance for that particular node. This ensures that at least some splits will be made based on the RC variables. This random varible sampling procedure is implemented in random forests to reduce bias and reduce the problem of overfitting when building machine learning models. This is a benefit of random forests, in that they tend to generalize to unseen data better than a single regression tree or than a linear regression trained on an entire dataset (as is nearly uniformly done in inferential experimental contexts, and like was done in the main text of the paper). However, this generizability comes at the cost of fitting the training/experimental dataset as accurately as possible, and at the expensive of interpretability of the final models.
+
+As an additional exploratory step, we will fit similar random forests, but without random samples of variables at each node split; we will use the full set of 5 predictor variables at each node. This will lead to overfitting the data in the sense that we will model the training dataset with as little error as possible (at the expensive generalizability), but only to the same extent that standard inferntial models are overfit (since they are trained on the entire experimental dataset). This will let us see, when all 5 varibles are candidates to split over, which are the strongest.
+
+```{r}
+# Generate 1000 trees per forest (more is beter; 500 is default),
+# and sample five predictors per node.
+cont <- cforest_control(ntree = 1000, mtry = 5)
+
+# Generate forests
+N4_ID_forest3 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Item, RC_N4_data,
+                         controls = cont)
+P6_ID_forest3 <- cforest(Amplitude ~ Grammaticality + VerbType + RC1 + RC2 + Item, RC_P6_data,
+                         controls = cont)
+
+saveRDS(N4_ID_forest3, "N4_ID_forest3.rds")
+saveRDS(P6_ID_forest3, "P6_ID_forest3.rds")
+
+```
+
+
+
+
+[^1]: This analysis does not use [the newer partykit package](https://cran.r-project.org/web/packages/partykit/vignettes/partykit.pdf), because partykit's implementation of the ctree function does not allow for categorical predictors with more than 31 levels. Here we are modeling subject and item as categorical effects, and these have large numbers (subjects = 114, items = 120), and the older implementation can achieve this.
+[^2]: The item numbers for each group are indicated on the plot -- those are in the horizontal string of numbers underneath nodes 2 and 7. Because of the large number of items, the whole set of items cannot be visualized on the plot with the default plotting method associated with the BinaryTree class generated by the ctree function. However, the actual item numbers are available for inspection inside the model objects, which you can generate if you run the script on your own.
